@@ -49,7 +49,7 @@ class CarListing(BaseModel):
     updated_at: datetime = Field(..., description="Row last-updated timestamp.")
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 
 class PaginatedListings(BaseModel):
@@ -112,3 +112,4 @@ class ModelEntry(BaseModel):
     make: str
     model: str
     listing_count: int
+
