@@ -49,7 +49,6 @@ HEADERS = {
 BASE_URL = "https://syarah.com/api/syarah_v1/ar/search/index"
 PAGE_LINK = "/autos"
 PAGE_SIZE = 16
-MAX_PAGES = 15   # cap at 240 listings per run to stay within free-tier limits
 
 
 def _parse_int(val) -> int:
@@ -151,7 +150,8 @@ def _product_to_listing(product: dict) -> dict | None:
     }
 
 
-def scrape() -> list:
+def scrape(max_pages: int = 15) -> list:
+    """Scrape Syarah listings via their internal JSON API."""
     logger.info("Syarah: starting scrape (token=%s…)", _TOKEN[:8])
     session = requests.Session()
 
@@ -161,7 +161,7 @@ def scrape() -> list:
         logger.warning("Syarah: page 1 returned 0 products — check token / API")
         return []
 
-    # Discover total pages from a lightweight metadata call (same endpoint)
+    # Discover total pages from the first response
     search_data = json.dumps(
         {"filters": {"text": ""}, "link": PAGE_LINK, "page": 1, "sort": "", "size": PAGE_SIZE, "new_path": True}
     )
@@ -175,8 +175,8 @@ def scrape() -> list:
     except Exception:
         total_pages = 1
 
-    pages_to_fetch = min(total_pages, MAX_PAGES)
-    logger.info("Syarah: fetching %d pages (cap=%d)", pages_to_fetch, MAX_PAGES)
+    pages_to_fetch = min(total_pages, max_pages)
+    logger.info("Syarah: fetching %d pages (cap=%d)", pages_to_fetch, max_pages)
 
     all_listings: list[dict] = []
 
@@ -199,9 +199,17 @@ def scrape() -> list:
 
         logger.info("Syarah page %d: %d listings", page, len(page_listings))
         all_listings.extend(page_listings)
-
-        # Polite delay
         time.sleep(0.5)
 
     logger.info("Syarah total: %d listings", len(all_listings))
     return all_listings
+
+
+class SyarahScraper:
+    """Class wrapper so main.py can use SyarahScraper(max_pages=N).scrape()."""
+
+    def __init__(self, max_pages: int = 15):
+        self.max_pages = max_pages
+
+    def scrape(self) -> list:
+        return scrape(max_pages=self.max_pages)
