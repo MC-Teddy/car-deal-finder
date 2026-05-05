@@ -5,8 +5,8 @@ Provides a REST API consumed by the frontend to browse car listings,
 filter by various attributes, and surface the best deals.
 
 Environment variables required:
-    SUPABASE_URL  — Supabase project URL
-    SUPABASE_KEY  — Supabase anon or service-role key
+    SUPABASE_URL  - Supabase project URL
+    SUPABASE_KEY  - Supabase anon or service-role JWT key
 """
 
 import logging
@@ -16,7 +16,7 @@ import sys
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from supabase import create_client, Client
+from postgrest import SyncPostgrestClient
 
 from routes import listings_router
 
@@ -27,7 +27,7 @@ load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -50,7 +50,7 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS — allow all origins in development; restrict in production via env
+# CORS
 # ---------------------------------------------------------------------------
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 
@@ -63,25 +63,31 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Supabase client — attached to app state for use in route dependencies
+# PostgREST client - attached to app state for use in route dependencies
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def startup_event() -> None:
     """
-    Connect to Supabase on application startup and attach the client
-    to app.state so routes can access it via request.app.state.db.
+    Connect to Supabase PostgREST on application startup.
+    Uses postgrest-py directly to avoid supabase-py key format validation.
     """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY")
+
     if not url or not key:
-        logger.critical(
-            "SUPABASE_URL and SUPABASE_KEY must be set. Shutting down."
-        )
+        logger.critical("SUPABASE_URL and SUPABASE_KEY must be set. Shutting down.")
         sys.exit(1)
 
-    app.state.db: Client = create_client(url, key)
-    logger.info("Supabase client connected. Project: %s", url)
+    logger.info("Connecting to Supabase: %s (key len=%d)", url, len(key))
+
+    rest_url = f"{url}/rest/v1"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+    }
+    app.state.db = SyncPostgrestClient(rest_url, headers=headers)
+    logger.info("PostgREST client ready at %s", rest_url)
 
 
 @app.on_event("shutdown")

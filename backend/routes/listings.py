@@ -14,7 +14,7 @@ import math
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from supabase import Client
+from postgrest import SyncPostgrestClient
 
 from models import (
     CarListing,
@@ -34,7 +34,7 @@ router = APIRouter()
 # Dependency: Supabase client from app state
 # ---------------------------------------------------------------------------
 
-def get_db(request: Request) -> Client:
+def get_db(request: Request) -> SyncPostgrestClient:
     """Retrieve the Supabase client attached to app.state at startup."""
     return request.app.state.db
 
