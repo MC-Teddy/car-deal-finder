@@ -1,7 +1,7 @@
-"""
+﻿"""
 Haraj.com scraper - v2 with API endpoint discovery.
 
-Haraj is a React SPA — the HTML shell has no listing data and no __NEXT_DATA__.
+Haraj is a React SPA â€” the HTML shell has no listing data and no __NEXT_DATA__.
 Strategy: probe known API endpoint patterns and use the first one that returns JSON.
 """
 import json
@@ -17,30 +17,35 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# API endpoints to probe in order; first JSON 200 wins
+# API endpoints to probe in order; first JSON 200 wins.
+# haraj.com/* serves the SPA HTML for ALL paths - try api.haraj.com subdomain.
 API_PROBES = [
-    # Haraj REST v2/v3 (used by mobile app)
+    # Separate API subdomain (most likely to work)
+    "https://api.haraj.com/v3/posts?want=cars&type=sell&city=0&last_id=0&limit=20",
+    "https://api.haraj.com/v2/posts?want=cars&type=sell&lang=en&city=0&last_id=0&limit=20",
+    "https://api.haraj.com/posts?want=cars&type=sell&city=0&limit=20",
+    "https://api.haraj.com/cars?city=0&limit=20",
+    # haraj.com.sa subdomain
+    "https://api.haraj.com.sa/v2/posts?want=cars&city=0&last_id=0&limit=20",
+    # RSS/Atom feeds (bypass SPA routing)
+    "https://haraj.com/rss.xml?want=cars",
+    "https://haraj.com/feed?want=cars&cat=cars",
+    # Original paths on main domain (all return SPA HTML, kept for logging)
     "https://haraj.com/api/v2/posts?want=cars&type=sell&lang=en&city=0&last_id=0&limit=20",
     "https://haraj.com/api/v3/posts?want=cars&type=sell&city=0&last_id=0&limit=20",
-    "https://haraj.com/api/posts?want=cars&type=sell&city=0&limit=20",
-    "https://haraj.com/en/api/posts?want=cars&city=0&limit=20",
-    # Alternative domain
-    "https://haraj.com.sa/api/v2/posts?want=cars&city=0&last_id=0&limit=20",
-    # GraphQL hint
-    "https://haraj.com/graphql",
 ]
 
 ARABIC_MAKES = {
-    "تويوتا": "Toyota", "هوندا": "Honda", "نيسان": "Nissan",
-    "هيونداي": "Hyundai", "كيا": "Kia", "فورد": "Ford",
-    "شيفروليه": "Chevrolet", "جيب": "Jeep", "دودج": "Dodge",
-    "بي ام دبليو": "BMW", "مرسيدس": "Mercedes-Benz", "لكزس": "Lexus",
-    "انفينيتي": "Infiniti", "أودي": "Audi", "فولكس واجن": "Volkswagen",
-    "بورش": "Porsche", "لاند روفر": "Land Rover", "رنج روفر": "Range Rover",
-    "ميتسوبيشي": "Mitsubishi", "سوزوكي": "Suzuki", "مازدا": "Mazda",
-    "كاديلاك": "Cadillac", "لينكون": "Lincoln", "جنسيس": "Genesis",
-    "غي ام سي": "GMC", "جي ام سي": "GMC", "GMC": "GMC",
-    "شانجان": "Changan", "هافال": "Haval", "BYD": "BYD", "MG": "MG",
+    "ØªÙˆÙŠÙˆØªØ§": "Toyota", "Ù‡ÙˆÙ†Ø¯Ø§": "Honda", "Ù†ÙŠØ³Ø§Ù†": "Nissan",
+    "Ù‡ÙŠÙˆÙ†Ø¯Ø§ÙŠ": "Hyundai", "ÙƒÙŠØ§": "Kia", "ÙÙˆØ±Ø¯": "Ford",
+    "Ø´ÙŠÙØ±ÙˆÙ„ÙŠÙ‡": "Chevrolet", "Ø¬ÙŠØ¨": "Jeep", "Ø¯ÙˆØ¯Ø¬": "Dodge",
+    "Ø¨ÙŠ Ø§Ù… Ø¯Ø¨Ù„ÙŠÙˆ": "BMW", "Ù…Ø±Ø³ÙŠØ¯Ø³": "Mercedes-Benz", "Ù„ÙƒØ²Ø³": "Lexus",
+    "Ø§Ù†ÙÙŠÙ†ÙŠØªÙŠ": "Infiniti", "Ø£ÙˆØ¯ÙŠ": "Audi", "ÙÙˆÙ„ÙƒØ³ ÙˆØ§Ø¬Ù†": "Volkswagen",
+    "Ø¨ÙˆØ±Ø´": "Porsche", "Ù„Ø§Ù†Ø¯ Ø±ÙˆÙØ±": "Land Rover", "Ø±Ù†Ø¬ Ø±ÙˆÙØ±": "Range Rover",
+    "Ù…ÙŠØªØ³ÙˆØ¨ÙŠØ´ÙŠ": "Mitsubishi", "Ø³ÙˆØ²ÙˆÙƒÙŠ": "Suzuki", "Ù…Ø§Ø²Ø¯Ø§": "Mazda",
+    "ÙƒØ§Ø¯ÙŠÙ„Ø§Ùƒ": "Cadillac", "Ù„ÙŠÙ†ÙƒÙˆÙ†": "Lincoln", "Ø¬Ù†Ø³ÙŠØ³": "Genesis",
+    "ØºÙŠ Ø§Ù… Ø³ÙŠ": "GMC", "Ø¬ÙŠ Ø§Ù… Ø³ÙŠ": "GMC", "GMC": "GMC",
+    "Ø´Ø§Ù†Ø¬Ø§Ù†": "Changan", "Ù‡Ø§ÙØ§Ù„": "Haval", "BYD": "BYD", "MG": "MG",
 }
 
 
@@ -252,7 +257,7 @@ class HarajScraper:
         text = soup.get_text(" ", strip=True)
         logger.info("DIAG[Haraj] text (500): %s", text[:500])
         if len(text) < 300:
-            logger.warning("DIAG[Haraj] Short page — SPA shell or bot challenge.")
+            logger.warning("DIAG[Haraj] Short page â€” SPA shell or bot challenge.")
 
     # ------------------------------------------------------------------
     # Public
@@ -304,7 +309,7 @@ class HarajScraper:
                     break
         else:
             # --- Phase 2: HTML fallback (diagnostic only for SPA) ---
-            logger.warning("Haraj: no working API found. Falling back to HTML (SPA — may return 0).")
+            logger.warning("Haraj: no working API found. Falling back to HTML (SPA â€” may return 0).")
             _, soup = self._get_html(self.CARS_URL)
             if soup:
                 self._log_diag(soup, self.CARS_URL)

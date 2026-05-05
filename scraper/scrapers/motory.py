@@ -1,4 +1,4 @@
-"""
+﻿"""
 Motory.com scraper - v2 with anti-403 headers.
 Motory returns 403 to basic scrapers; full browser header set + Google Referer.
 """
@@ -29,7 +29,7 @@ class MotoryScraper:
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Referer": "https://www.google.com/search?q=used+cars+saudi+arabia+motory",
         "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
         "sec-ch-ua-mobile": "?0",
@@ -52,7 +52,7 @@ class MotoryScraper:
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Referer": "https://www.google.com/",
         "Connection": "keep-alive",
     }
@@ -200,7 +200,7 @@ class MotoryScraper:
         logger.info("DIAG[Motory] all classes: %s", sorted(classes)[:40])
         logger.info("DIAG[Motory] text (500): %s", soup.get_text(" ", strip=True)[:500])
         if len(soup.get_text(" ", strip=True)) < 300:
-            logger.warning("DIAG[Motory] Very short text — possible JS-only or bot block.")
+            logger.warning("DIAG[Motory] Very short text â€” possible JS-only or bot block.")
 
     def _parse_from_html(self, soup, url) -> list:
         selectors = [
@@ -230,7 +230,7 @@ class MotoryScraper:
                 price_text = price_el.get_text(strip=True) if price_el else ""
                 price_clean = re.sub(r"[^\d.]", "", price_text.replace(",", ""))
                 price_sar = float(price_clean) if price_clean else None
-                m = re.search(r"([\d,]+)\s*(?:km|كم)", card.get_text(" "), re.IGNORECASE)
+                m = re.search(r"([\d,]+)\s*(?:km|ÙƒÙ…)", card.get_text(" "), re.IGNORECASE)
                 mileage_km = int(re.sub(r"[^\d]", "", m.group(1))) if m else None
                 yr = re.search(r"\b(19[89]\d|20[012]\d)\b", raw_title)
                 year = int(yr.group(1)) if yr else None
@@ -253,7 +253,7 @@ class MotoryScraper:
         all_listings = []
         for page in range(1, self.max_pages + 1):
             url = self._page_url(page)
-            logger.info("Motory: fetching page %d — %s", page, url)
+            logger.info("Motory: fetching page %d â€” %s", page, url)
             resp, soup = self._get(url)
             if soup is None:
                 break

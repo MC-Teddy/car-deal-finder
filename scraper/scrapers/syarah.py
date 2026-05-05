@@ -1,4 +1,4 @@
-"""
+﻿"""
 Syarah.com scraper - v2 with URL auto-discovery.
 /used-cars/ now returns 404; try several candidate paths.
 """
@@ -36,7 +36,7 @@ class SyarahScraper:
         ),
         "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     }
 
@@ -237,7 +237,7 @@ class SyarahScraper:
             price_el = card.select_one("[class*='price']") or card.select_one("[data-price]")
             price_text = (price_el.get("data-price") or price_el.get_text(strip=True)) if price_el else ""
             price_sar = float(re.sub(r"[^\d.]", "", price_text.replace(",", ""))) if re.sub(r"[^\d.]", "", price_text.replace(",", "")) else None
-            m = re.search(r"([\d,]+)\s*(?:km|كم)", card.get_text(" "), re.IGNORECASE)
+            m = re.search(r"([\d,]+)\s*(?:km|ÙƒÙ…)", card.get_text(" "), re.IGNORECASE)
             mileage_km = int(re.sub(r"[^\d]", "", m.group(1))) if m else None
             yr = re.search(r"\b(19[89]\d|20[012]\d)\b", raw_title)
             year = int(yr.group(1)) if yr else None
@@ -264,7 +264,7 @@ class SyarahScraper:
 
         for page in range(1, self.max_pages + 1):
             url = self._page_url(base_url, page)
-            logger.info("Syarah: fetching page %d — %s", page, url)
+            logger.info("Syarah: fetching page %d â€” %s", page, url)
             resp, soup = self._get(url)
             if soup is None:
                 break
