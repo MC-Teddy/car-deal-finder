@@ -97,12 +97,85 @@ class SyarahScraper:
 
     def _extract_next_data(self, soup) -> dict:
         script = soup.find("script", id="__NEXT_DATA__")
-        if script and script.string:
+        if not script:
+            logger.info("Syarah: no __NEXT_DATA__ tag found (CSR page)")
+            return {}
+        if not script.string:
+            logger.info("Syarah: __NEXT_DATA__ tag empty")
+            return {}
+        try:
+            data = json.loads(script.string)
+            logger.info("Syarah: __NEXT_DATA__ found. Keys: %s, buildId: %s",
+                        list(data.keys())[:8], data.get("buildId", "?"))
+            return data
+        except json.JSONDecodeError as e:
+            logger.warning("Syarah: __NEXT_DATA__ JSON parse failed: %s", e)
+            return {}
+
+    def _get_next_build_id(self, soup) -> Optional[str]:
+        """Extract Next.js buildId from __NEXT_DATA__ or script src URLs."""
+        data = self._extract_next_data(soup)
+        if data.get("buildId"):
+            return data["buildId"]
+        # Fallback: parse from script src like /_next/static/BUILD_ID/...
+        for tag in soup.find_all("script", src=True):
+            m = re.search(r"/_next/static/([^/]+)/", tag.get("src", ""))
+            if m and m.group(1) not in ("chunks", "css", "media"):
+                return m.group(1)
+        return None
+
+    def _probe_next_data_api(self, build_id: str, base_url: str) -> list:
+        """Try /_next/data/{buildId}/cars.json — Next.js SSR data endpoint."""
+        path = base_url.rstrip("/").replace(self.BASE_URL, "")
+        if not path:
+            path = "/cars"
+        candidates = [
+            f"{self.BASE_URL}/_next/data/{build_id}{path}.json",
+            f"{self.BASE_URL}/_next/data/{build_id}/cars.json",
+            f"{self.BASE_URL}/_next/data/{build_id}/used-cars.json",
+        ]
+        for url in candidates:
             try:
-                return json.loads(script.string)
-            except json.JSONDecodeError:
-                pass
-        return {}
+                resp = self.session.get(url, timeout=self.timeout)
+                logger.info("Syarah _next/data probe: %s -> %d [%s]",
+                            url, resp.status_code, resp.headers.get("content-type", "")[:50])
+                if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
+                    data = resp.json()
+                    logger.info("Syarah _next/data JSON keys: %s", list(data.keys())[:10])
+                    cars = self._find_car_arrays(data)
+                    if cars:
+                        logger.info("Syarah _next/data: found %d cars!", len(cars))
+                        return [l for l in (self._json_car_to_listing(c) for c in cars) if l]
+            except Exception as exc:
+                logger.warning("Syarah _next/data probe error %s: %s", url, exc)
+        return []
+
+    def _probe_api_endpoints(self, page: int = 1) -> list:
+        """Try Syarah internal API endpoints that the React frontend calls."""
+        api_candidates = [
+            f"https://syarah.com/api/v1/cars?condition=used&page={page}&limit=20",
+            f"https://syarah.com/api/cars?type=used&page={page}",
+            f"https://syarah.com/api/search/?type=used-cars&page={page}",
+            f"https://syarah.com/api/v1/listings?type=used&page={page}",
+            f"https://syarah.com/en/api/cars?condition=used&page={page}",
+        ]
+        api_headers = {**self.HEADERS, "Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}
+        for url in api_candidates:
+            try:
+                resp = self.session.get(url, headers=api_headers, timeout=self.timeout)
+                ct = resp.headers.get("content-type", "")
+                logger.info("Syarah API probe: %s -> %d [%s]", url, resp.status_code, ct[:50])
+                if resp.status_code == 200 and "json" in ct:
+                    data = resp.json()
+                    cars = self._find_car_arrays(data)
+                    if cars:
+                        logger.info("Syarah API: found %d cars at %s!", len(cars), url)
+                        return [l for l in (self._json_car_to_listing(c) for c in cars) if l]
+                    logger.info("Syarah API JSON at %s - no car arrays. Keys: %s",
+                                url, list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__)
+            except Exception as exc:
+                logger.warning("Syarah API probe error %s: %s", url, exc)
+        return []
 
     def _find_car_arrays(self, obj, depth: int = 0) -> list:
         if depth > 8:
