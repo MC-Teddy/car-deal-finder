@@ -31,11 +31,11 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Dependency: Supabase client from app state
+# Dependency: Supabase SyncPostgrestClient from app state
 # ---------------------------------------------------------------------------
 
 def get_db(request: Request) -> SyncPostgrestClient:
-    """Retrieve the Supabase client attached to app.state at startup."""
+    """Retrieve the Supabase SyncPostgrestClient attached to app.state at startup."""
     return request.app.state.db
 
 
@@ -84,7 +84,7 @@ def _apply_filters(query, make, model, year, city, min_deal_score, source):
     ),
 )
 async def get_listings(
-    db: Client = Depends(get_db),
+    db: SyncPostgrestClient = Depends(get_db),
     page: int = Query(1, ge=1, description="Page number (1-indexed)."),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Items per page."),
     make: Optional[str] = Query(None, description="Filter by make (case-insensitive partial match)."),
@@ -153,7 +153,7 @@ async def get_listings(
     description="Return up to 50 listings with a deal_score greater than 10% (good or excellent tier).",
 )
 async def get_top_deals(
-    db: Client = Depends(get_db),
+    db: SyncPostgrestClient = Depends(get_db),
     limit: int = Query(50, ge=1, le=100, description="Maximum results to return."),
     make: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
@@ -196,7 +196,7 @@ async def get_top_deals(
         "and top 10 makes by listing count with their average deal score."
     ),
 )
-async def get_stats(db: Client = Depends(get_db)) -> MarketStatsResponse:
+async def get_stats(db: SyncPostgrestClient = Depends(get_db)) -> MarketStatsResponse:
     """Aggregate market statistics for dashboard display."""
     try:
         # Total listings
@@ -275,7 +275,7 @@ async def get_stats(db: Client = Depends(get_db)) -> MarketStatsResponse:
     summary="Distinct makes",
     description="Return a list of distinct car makes available in the database, sorted by listing count.",
 )
-async def get_makes(db: Client = Depends(get_db)) -> list[dict]:
+async def get_makes(db: SyncPostgrestClient = Depends(get_db)) -> list[dict]:
     """Return distinct makes for populating filter dropdowns."""
     try:
         resp = db.table("distinct_makes").select("*").execute()
@@ -315,7 +315,7 @@ async def get_makes(db: Client = Depends(get_db)) -> list[dict]:
     description="Return distinct models for a given make, sorted by listing count.",
 )
 async def get_models(
-    db: Client = Depends(get_db),
+    db: SyncPostgrestClient = Depends(get_db),
     make: str = Query(..., description="The make to filter models by."),
 ) -> list[dict]:
     """Return distinct models for a given make."""
