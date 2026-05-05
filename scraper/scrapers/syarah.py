@@ -1,355 +1,207 @@
-﻿"""
-Syarah.com scraper - v2 with URL auto-discovery.
-/used-cars/ now returns 404; try several candidate paths.
 """
+Syarah.com scraper — v5 (internal JSON API)
+
+Discovery (May 2026):
+  API:     https://syarah.com/api/syarah_v1/ar/search/index
+  Auth:    `token` header (static app-level key stored in encrypted UUID cookie)
+  Data:    data.products[]  →  g4_data_layer sub-object holds clean English fields
+  Total:   ~3 600 listings, 230 pages @ 16 per page
+
+Auth notes:
+  The token is derived by the page JS from an AES-encrypted UUID cookie.
+  We expose it as the env-var / GitHub Secret  SYARAH_TOKEN.
+  If the scraper starts returning 401, refresh the token by opening
+  syarah.com/autos in a browser and capturing the XHR `token` header.
+"""
+
 import json
 import logging
-import re
+import os
 import time
-from datetime import datetime
-from typing import Optional
-from urllib.parse import urljoin
+import uuid
+import re
 
 import requests
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# URL candidates in priority order; first 200 response wins
-LISTING_URL_CANDIDATES = [
-    "https://syarah.com/used-cars/",
-    "https://syarah.com/en/used-cars/",
-    "https://syarah.com/buy/",
-    "https://syarah.com/cars/",
-    "https://syarah.com/buy-used-cars/",
-    "https://syarah.com/",
-]
+_TOKEN = os.getenv("SYARAH_TOKEN", "JR4iENSB52eTFYnRgmNgtpZXVBf3wHue")
+_USER_ID = f"uid-{int(time.time() * 1000)}-{int(uuid.uuid4().int % 100000)}"
+_GBUUID = str(uuid.uuid4())
 
-class SyarahScraper:
-    BASE_URL = "https://syarah.com"
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "token": _TOKEN,
+    "user-id": _USER_ID,
+    "gbuuid": _GBUUID,
+    "device": "web",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://syarah.com/autos",
+    "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+}
 
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
+BASE_URL = "https://syarah.com/api/syarah_v1/ar/search/index"
+PAGE_LINK = "/autos"
+PAGE_SIZE = 16
+MAX_PAGES = 15   # cap at 240 listings per run to stay within free-tier limits
+
+
+def _parse_int(val) -> int:
+    """'76,509' → 76509 ;  None / '' → 0"""
+    if val is None:
+        return 0
+    cleaned = re.sub(r"[^\d]", "", str(val))
+    return int(cleaned) if cleaned else 0
+
+
+def _fetch_page(session: requests.Session, page: int) -> list:
+    search_data = json.dumps(
+        {
+            "filters": {"text": ""},
+            "link": PAGE_LINK,
+            "page": page,
+            "sort": "",
+            "size": PAGE_SIZE,
+            "new_path": True,
+        }
+    )
+    params = {
+        "ps": f"{page}-{PAGE_SIZE}",
+        "includes": "meta_tags,seo_data,quality_section",
+        "search_data": search_data,
+    }
+    try:
+        resp = session.get(BASE_URL, params=params, headers=HEADERS, timeout=20)
+    except requests.RequestException as exc:
+        logger.warning("Syarah page %d request error: %s", page, exc)
+        return []
+
+    if resp.status_code == 401:
+        logger.error(
+            "Syarah: 401 Unauthorized — SYARAH_TOKEN has expired. "
+            "Update the GitHub Secret and re-run."
+        )
+        return []
+
+    if resp.status_code != 200:
+        logger.warning("Syarah page %d: HTTP %s", page, resp.status_code)
+        return []
+
+    try:
+        body = resp.json()
+    except ValueError:
+        logger.warning("Syarah page %d: non-JSON response", page)
+        return []
+
+    if not body.get("success"):
+        logger.warning(
+            "Syarah page %d: API error %s — %s",
+            page, body.get("code"), body.get("message"),
+        )
+        return []
+
+    return body.get("data", {}).get("products", [])
+
+
+def _product_to_listing(product: dict) -> dict | None:
+    """Extract a normalised listing dict from a Syarah API product entry."""
+    gl = product.get("g4_data_layer") or {}
+
+    condition = gl.get("post_condition", "")
+    if condition.lower() not in ("used", ""):
+        return None   # skip brand-new cars
+
+    post_id = str(product.get("id", ""))
+    if not post_id:
+        return None
+
+    # Price — prefer g4 numeric field, fallback to sellingprice string
+    price = gl.get("post_price") or _parse_int(product.get("sellingprice", ""))
+    if not price:
+        return None
+
+    mileage = _parse_int(gl.get("post_mileage"))
+    year = int(gl.get("post_year") or product.get("year") or 0)
+
+    url_path = product.get("product_url", f"/cardetail/{post_id}")
+    listing_url = f"https://syarah.com{url_path}"
+
+    return {
+        "source": "syarah",
+        "listing_id": f"syarah-{post_id}",
+        "url": listing_url,
+        "title": (product.get("title_en") or product.get("title") or "").strip(),
+        "make": gl.get("post_make", ""),
+        "model": gl.get("post_model", ""),
+        "year": year,
+        "price": price,
+        "mileage": mileage,
+        "city": gl.get("post_city") or product.get("city_name", ""),
+        "fuel_type": gl.get("post_fuel", ""),
+        "transmission": gl.get("post_transmission", ""),
+        "color": gl.get("post_exterior_color_id", ""),
+        "image_url": product.get("image_url", ""),
+        "condition": condition or "Used",
     }
 
-    def __init__(self, max_pages: int = 5, delay: float = 2.5, timeout: int = 20):
-        self.max_pages = min(max_pages, 3)
-        self.delay = delay
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update(self.HEADERS)
-        self._base_listing_url = None
 
-    # ------------------------------------------------------------------
-    # URL discovery
-    # ------------------------------------------------------------------
+def scrape() -> list:
+    logger.info("Syarah: starting scrape (token=%s…)", _TOKEN[:8])
+    session = requests.Session()
 
-    def _discover_listing_url(self) -> Optional[str]:
-        """Try candidate URLs and return the first one that returns HTTP 200."""
-        for url in LISTING_URL_CANDIDATES:
-            try:
-                resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
-                logger.info("Syarah URL probe: %s -> %d", url, resp.status_code)
-                if resp.status_code == 200:
-                    # Check it actually has some content
-                    if len(resp.text) > 500:
-                        logger.info("Syarah: using listing URL %s", url)
-                        return url
-            except Exception as exc:
-                logger.warning("Syarah URL probe error for %s: %s", url, exc)
-        return None
-
-    def _page_url(self, base: str, page: int) -> str:
-        if page == 1:
-            return base
-        sep = "&" if "?" in base else "?"
-        return f"{base}{sep}page={page}"
-
-    # ------------------------------------------------------------------
-    # HTTP
-    # ------------------------------------------------------------------
-
-    def _get(self, url: str):
-        try:
-            resp = self.session.get(url, timeout=self.timeout)
-            if resp.status_code in (404, 410):
-                logger.warning("Syarah %d for %s", resp.status_code, url)
-                return None, None
-            resp.raise_for_status()
-            return resp, BeautifulSoup(resp.text, "lxml")
-        except requests.exceptions.HTTPError as exc:
-            logger.error("HTTP error %s: %s", url, exc)
-        except Exception as exc:
-            logger.error("Error %s: %s", url, exc)
-        return None, None
-
-    # ------------------------------------------------------------------
-    # __NEXT_DATA__ extraction
-    # ------------------------------------------------------------------
-
-    def _extract_next_data(self, soup) -> dict:
-        script = soup.find("script", id="__NEXT_DATA__")
-        if not script:
-            logger.info("Syarah: no __NEXT_DATA__ tag found (CSR page)")
-            return {}
-        if not script.string:
-            logger.info("Syarah: __NEXT_DATA__ tag empty")
-            return {}
-        try:
-            data = json.loads(script.string)
-            logger.info("Syarah: __NEXT_DATA__ found. Keys: %s, buildId: %s",
-                        list(data.keys())[:8], data.get("buildId", "?"))
-            return data
-        except json.JSONDecodeError as e:
-            logger.warning("Syarah: __NEXT_DATA__ JSON parse failed: %s", e)
-            return {}
-
-    def _get_next_build_id(self, soup) -> Optional[str]:
-        """Extract Next.js buildId from __NEXT_DATA__ or script src URLs."""
-        data = self._extract_next_data(soup)
-        if data.get("buildId"):
-            return data["buildId"]
-        # Fallback: parse from script src like /_next/static/BUILD_ID/...
-        for tag in soup.find_all("script", src=True):
-            m = re.search(r"/_next/static/([^/]+)/", tag.get("src", ""))
-            if m and m.group(1) not in ("chunks", "css", "media"):
-                return m.group(1)
-        return None
-
-    def _probe_next_data_api(self, build_id: str, base_url: str) -> list:
-        """Try /_next/data/{buildId}/cars.json — Next.js SSR data endpoint."""
-        path = base_url.rstrip("/").replace(self.BASE_URL, "")
-        if not path:
-            path = "/cars"
-        candidates = [
-            f"{self.BASE_URL}/_next/data/{build_id}{path}.json",
-            f"{self.BASE_URL}/_next/data/{build_id}/cars.json",
-            f"{self.BASE_URL}/_next/data/{build_id}/used-cars.json",
-        ]
-        for url in candidates:
-            try:
-                resp = self.session.get(url, timeout=self.timeout)
-                logger.info("Syarah _next/data probe: %s -> %d [%s]",
-                            url, resp.status_code, resp.headers.get("content-type", "")[:50])
-                if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
-                    data = resp.json()
-                    logger.info("Syarah _next/data JSON keys: %s", list(data.keys())[:10])
-                    cars = self._find_car_arrays(data)
-                    if cars:
-                        logger.info("Syarah _next/data: found %d cars!", len(cars))
-                        return [l for l in (self._json_car_to_listing(c) for c in cars) if l]
-            except Exception as exc:
-                logger.warning("Syarah _next/data probe error %s: %s", url, exc)
+    # --- page 1 to discover total pages ---
+    first_page_products = _fetch_page(session, 1)
+    if not first_page_products:
+        logger.warning("Syarah: page 1 returned 0 products — check token / API")
         return []
 
-    def _probe_api_endpoints(self, page: int = 1) -> list:
-        """Try Syarah internal API endpoints that the React frontend calls."""
-        api_candidates = [
-            f"https://syarah.com/api/v1/cars?condition=used&page={page}&limit=20",
-            f"https://syarah.com/api/cars?type=used&page={page}",
-            f"https://syarah.com/api/search/?type=used-cars&page={page}",
-            f"https://syarah.com/api/v1/listings?type=used&page={page}",
-            f"https://syarah.com/en/api/cars?condition=used&page={page}",
-        ]
-        api_headers = {**self.HEADERS, "Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}
-        for url in api_candidates:
-            try:
-                resp = self.session.get(url, headers=api_headers, timeout=self.timeout)
-                ct = resp.headers.get("content-type", "")
-                logger.info("Syarah API probe: %s -> %d [%s]", url, resp.status_code, ct[:50])
-                if resp.status_code == 200 and "json" in ct:
-                    data = resp.json()
-                    cars = self._find_car_arrays(data)
-                    if cars:
-                        logger.info("Syarah API: found %d cars at %s!", len(cars), url)
-                        return [l for l in (self._json_car_to_listing(c) for c in cars) if l]
-                    logger.info("Syarah API JSON at %s - no car arrays. Keys: %s",
-                                url, list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__)
-            except Exception as exc:
-                logger.warning("Syarah API probe error %s: %s", url, exc)
-        return []
+    # Discover total pages from a lightweight metadata call (same endpoint)
+    search_data = json.dumps(
+        {"filters": {"text": ""}, "link": PAGE_LINK, "page": 1, "sort": "", "size": PAGE_SIZE, "new_path": True}
+    )
+    params = {"ps": f"1-{PAGE_SIZE}", "includes": "meta_tags,seo_data,quality_section", "search_data": search_data}
+    try:
+        meta_resp = session.get(BASE_URL, params=params, headers=HEADERS, timeout=20)
+        meta = meta_resp.json()
+        total_pages = int(meta.get("data", {}).get("total_pages") or 1)
+        total_count = int(meta.get("data", {}).get("products_count") or 0)
+        logger.info("Syarah: %d listings across %d pages", total_count, total_pages)
+    except Exception:
+        total_pages = 1
 
-    def _find_car_arrays(self, obj, depth: int = 0) -> list:
-        if depth > 8:
-            return []
-        if isinstance(obj, list) and len(obj) >= 1 and isinstance(obj[0], dict):
-            first = obj[0]
-            car_keys = {"price", "year", "make", "model", "mileage", "km",
-                        "url", "id", "slug", "title", "name", "brand",
-                        "price_sar", "priceValue", "sell_price"}
-            if len({str(k).lower() for k in first.keys()} & {k.lower() for k in car_keys}) >= 2:
-                return obj
-        if isinstance(obj, dict):
-            for key in ["cars", "listings", "usedCars", "used_cars", "data",
-                        "results", "items", "vehicles", "pageProps", "props"]:
-                if key in obj:
-                    r = self._find_car_arrays(obj[key], depth + 1)
-                    if r:
-                        return r
-            for v in obj.values():
-                if isinstance(v, (dict, list)):
-                    r = self._find_car_arrays(v, depth + 1)
-                    if r:
-                        return r
-        return []
+    pages_to_fetch = min(total_pages, MAX_PAGES)
+    logger.info("Syarah: fetching %d pages (cap=%d)", pages_to_fetch, MAX_PAGES)
 
-    def _json_car_to_listing(self, car: dict) -> Optional[dict]:
-        def pick(d, *keys):
-            for k in keys:
-                v = d.get(k)
-                if v is not None and v != "":
-                    return v
-            return None
+    all_listings: list[dict] = []
 
-        url_raw = pick(car, "url", "link", "slug", "permalink", "path")
-        if not url_raw:
-            return None
-        url = url_raw if url_raw.startswith("http") else urljoin(self.BASE_URL, "/" + url_raw.lstrip("/"))
+    # Process page 1 results already fetched
+    for product in first_page_products:
+        listing = _product_to_listing(product)
+        if listing:
+            all_listings.append(listing)
 
-        make  = pick(car, "make", "brand", "brandName", "make_en", "manufacturer")
-        model = pick(car, "model", "modelName", "model_en")
-        year  = pick(car, "year", "model_year", "modelYear")
-        price = pick(car, "price", "price_sar", "priceValue", "final_price", "sell_price")
-        mileage = pick(car, "mileage", "km", "kilometers", "odometer")
-        city  = pick(car, "city", "location", "cityName", "region")
-        title = pick(car, "title", "name", "car_name", "listing_title")
-        if not title and make and model:
-            title = f"{make} {model} {year or ''}".strip()
+    logger.info("Syarah page 1: %d used-car listings", len(all_listings))
 
-        for field, val in [("price", price), ("year", year), ("mileage", mileage)]:
-            try:
-                locals()[field] = float(val) if field == "price" else int(float(val)) if val is not None else None
-            except (ValueError, TypeError):
-                locals()[field] = None
+    # Fetch remaining pages
+    for page in range(2, pages_to_fetch + 1):
+        products = _fetch_page(session, page)
+        page_listings = []
+        for product in products:
+            listing = _product_to_listing(product)
+            if listing:
+                page_listings.append(listing)
 
-        try:
-            price = float(price) if price is not None else None
-        except (ValueError, TypeError):
-            price = None
-        try:
-            year = int(year) if year is not None else None
-        except (ValueError, TypeError):
-            year = None
-        try:
-            mileage = int(float(mileage)) if mileage is not None else None
-        except (ValueError, TypeError):
-            mileage = None
+        logger.info("Syarah page %d: %d listings", page, len(page_listings))
+        all_listings.extend(page_listings)
 
-        return {
-            "source": "syarah", "title": str(title) if title else None,
-            "make": str(make) if make else None, "model": str(model) if model else None,
-            "year": year, "price_sar": price, "mileage_km": mileage,
-            "city": str(city) if city else None,
-            "listed_at": datetime.utcnow().isoformat(), "url": url, "seller_type": "dealer",
-        }
+        # Polite delay
+        time.sleep(0.5)
 
-    def _parse_from_next_data(self, soup) -> list:
-        data = self._extract_next_data(soup)
-        if not data:
-            return []
-        cars = self._find_car_arrays(data)
-        if not cars:
-            pp = data.get("props", {}).get("pageProps", {})
-            logger.info("Syarah __NEXT_DATA__ found, no car arrays. pageProps keys: %s", list(pp.keys())[:15])
-            return []
-        listings = [self._json_car_to_listing(c) for c in cars]
-        listings = [l for l in listings if l]
-        logger.info("Syarah: %d listings from __NEXT_DATA__.", len(listings))
-        return listings
-
-    # ------------------------------------------------------------------
-    # HTML fallback
-    # ------------------------------------------------------------------
-
-    def _log_diag(self, soup, url):
-        title = soup.title.string.strip() if soup.title else "NO TITLE"
-        logger.info("DIAG[Syarah] title: '%s' | url: %s", title, url)
-        classes = set()
-        for tag in soup.find_all(True, limit=300):
-            for cls in tag.get("class", []):
-                classes.add(cls)
-        rel = sorted(c for c in classes if any(
-            kw in c.lower() for kw in ["car", "list", "card", "item", "vehicle", "product", "ad"]))
-        logger.info("DIAG[Syarah] relevant classes: %s", rel[:40])
-        logger.info("DIAG[Syarah] all classes: %s", sorted(classes)[:40])
-        logger.info("DIAG[Syarah] text (500): %s", soup.get_text(" ", strip=True)[:500])
-
-    def _parse_from_html(self, soup, url) -> list:
-        selectors = [
-            "div.car-card", "[class*='car-card']", "[class*='CarCard']",
-            "[class*='listing-card']", "[class*='vehicle-card']",
-            "[class*='product-card']", "article.car", "li[class*='car']",
-        ]
-        cards = []
-        for sel in selectors:
-            cards = soup.select(sel)
-            if cards:
-                logger.info("Syarah HTML selector '%s' -> %d cards.", sel, len(cards))
-                break
-        if not cards:
-            self._log_diag(soup, url)
-            return []
-        return [l for l in (self._html_card(c) for c in cards) if l]
-
-    def _html_card(self, card) -> Optional[dict]:
-        try:
-            link = card.select_one("a[href]")
-            if not link:
-                return None
-            url = urljoin(self.BASE_URL, link.get("href", ""))
-            title_el = card.select_one("[class*='title']") or card.select_one("h2") or card.select_one("h3")
-            raw_title = title_el.get_text(" ", strip=True) if title_el else ""
-            price_el = card.select_one("[class*='price']") or card.select_one("[data-price]")
-            price_text = (price_el.get("data-price") or price_el.get_text(strip=True)) if price_el else ""
-            price_sar = float(re.sub(r"[^\d.]", "", price_text.replace(",", ""))) if re.sub(r"[^\d.]", "", price_text.replace(",", "")) else None
-            m = re.search(r"([\d,]+)\s*(?:km|ÙƒÙ…)", card.get_text(" "), re.IGNORECASE)
-            mileage_km = int(re.sub(r"[^\d]", "", m.group(1))) if m else None
-            yr = re.search(r"\b(19[89]\d|20[012]\d)\b", raw_title)
-            year = int(yr.group(1)) if yr else None
-            parts = raw_title.split()
-            return {"source": "syarah", "title": raw_title,
-                    "make": parts[0] if parts else None, "model": parts[1] if len(parts) > 1 else None,
-                    "year": year, "price_sar": price_sar, "mileage_km": mileage_km, "city": None,
-                    "listed_at": datetime.utcnow().isoformat(), "url": url, "seller_type": "dealer"}
-        except Exception as exc:
-            logger.debug("Syarah HTML card parse error: %s", exc)
-            return None
-
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
-    def scrape(self) -> list:
-        all_listings = []
-
-        base_url = self._discover_listing_url()
-        if not base_url:
-            logger.error("Syarah: no working listing URL found. Tried: %s", LISTING_URL_CANDIDATES)
-            return []
-
-        for page in range(1, self.max_pages + 1):
-            url = self._page_url(base_url, page)
-            logger.info("Syarah: fetching page %d â€” %s", page, url)
-            resp, soup = self._get(url)
-            if soup is None:
-                break
-
-            page_listings = self._parse_from_next_data(soup) or self._parse_from_html(soup, url)
-            logger.info("Syarah page %d: %d listings.", page, len(page_listings))
-            all_listings.extend(page_listings)
-
-            if not page_listings:
-                break
-            if page < self.max_pages:
-                time.sleep(self.delay)
-
-        logger.info("Syarah total: %d listings.", len(all_listings))
-        return all_listings
+    logger.info("Syarah total: %d listings", len(all_listings))
+    return all_listings
