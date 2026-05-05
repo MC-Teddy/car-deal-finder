@@ -36,5 +36,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SYARAH_TOKEN: ${{ secrets.SYARAH_TOKEN }}
           SCRAPER_MAX_PAGES: ${{ github.event.inputs.max_pages || '5' }}
         run: python main.py
